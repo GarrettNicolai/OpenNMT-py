@@ -17,11 +17,13 @@ class Statistics(object):
     * elapsed time
     """
 
-    def __init__(self, loss=0, n_words=0, n_correct=0):
+    def __init__(self, loss=0, n_words=0, n_correct=0, n_sents_correct=0, n_sents=0):
         self.loss = loss
         self.n_words = n_words
+        self.n_sents = n_sents
         self.n_correct = n_correct
         self.n_src_words = 0
+        self.n_sents_correct = n_sents_correct
         self.start_time = time.time()
 
     @staticmethod
@@ -80,14 +82,19 @@ class Statistics(object):
         """
         self.loss += stat.loss
         self.n_words += stat.n_words
+        self.n_sents += stat.n_sents
         self.n_correct += stat.n_correct
-
+        self.n_sents_correct += stat.n_sents_correct
         if update_n_src_words:
             self.n_src_words += stat.n_src_words
 
     def accuracy(self):
         """ compute accuracy """
         return 100 * (self.n_correct / self.n_words)
+    
+    def sent_accuracy(self):
+        """ compute accuracy """
+        return 100 * (self.n_sents_correct / self.n_sents)
 
     def xent(self):
         """ compute cross entropy """

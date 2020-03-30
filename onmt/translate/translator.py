@@ -28,7 +28,6 @@ def build_translator(opt, report_score=True, logger=None, out_file=None):
     fields, model, model_opt = load_test_model(opt)
 
     scorer = onmt.translate.GNMTGlobalScorer.from_opt(opt)
-
     translator = Translator.from_opt(
         model,
         fields,
@@ -40,6 +39,8 @@ def build_translator(opt, report_score=True, logger=None, out_file=None):
         report_score=report_score,
         logger=logger
     )
+    model.decoder.set_eval_status(True)
+
     return translator
 
 
@@ -315,9 +316,6 @@ class Translator(object):
         _readers, _data, _dir = inputters.Dataset.config(
             [('src', src_data), ('tgt', tgt_data)])
 
-        # corpus_id field is useless here
-        if self.fields.get("corpus_id", None) is not None:
-            self.fields.pop('corpus_id')
         data = inputters.Dataset(
             self.fields, readers=_readers, data=_data, dirs=_dir,
             sort_key=inputters.str2sortkey[self.data_type],
@@ -355,7 +353,6 @@ class Translator(object):
                 batch, data.src_vocabs, attn_debug
             )
             translations = xlation_builder.from_batch(batch_data)
-
             for trans in translations:
                 all_scores += [trans.pred_scores[:self.n_best]]
                 pred_score_total += trans.pred_scores[0]
@@ -515,6 +512,7 @@ class Translator(object):
         return alignement
 
     def translate_batch(self, batch, src_vocabs, attn_debug):
+        #self.model.decoder.set_eval_status(True)
         """Translate a batch of sentences."""
         with torch.no_grad():
             if self.beam_size == 1:
@@ -546,6 +544,9 @@ class Translator(object):
                     exclusion_tokens=self._exclusion_idxs,
                     stepwise_penalty=self.stepwise_penalty,
                     ratio=self.ratio)
+            
+            #self.model.decoder.set_eval_status(False)
+
             return self._translate_batch_with_strategy(batch, src_vocabs,
                                                        decode_strategy)
 
@@ -584,6 +585,7 @@ class Translator(object):
         # and [src_len, batch, hidden] as memory_bank
         # in case of inference tgt_len = 1, batch = beam times batch_size
         # in case of Gold Scoring tgt_len = actual length, batch = 1 batch
+        self.model.decoder.set_copy_info(batch, self._tgt_vocab)
         dec_out, dec_attn = self.model.decoder(
             decoder_in, memory_bank, memory_lengths=memory_lengths, step=step
         )
@@ -599,6 +601,8 @@ class Translator(object):
             # or [ tgt_len, batch_size, vocab ] when full sentence
         else:
             attn = dec_attn["copy"]
+            #print("DEC_OUT: ", dec_out.size())
+            #print("ATTN: ", attn.size())
             scores = self.model.generator(dec_out.view(-1, dec_out.size(2)),
                                           attn.view(-1, attn.size(2)),
                                           src_map)
@@ -608,6 +612,9 @@ class Translator(object):
                 scores = scores.transpose(0, 1).contiguous()
             else:
                 scores = scores.view(-1, self.beam_size, scores.size(-1))
+
+
+            #print("TGT_VOCAB: ", self._tgt_vocab)
             scores = collapse_copy_scores(
                 scores,
                 batch,
@@ -617,7 +624,9 @@ class Translator(object):
                 batch_offset=batch_offset
             )
             scores = scores.view(decoder_in.size(0), -1, scores.size(-1))
+
             log_probs = scores.squeeze(0).log()
+            #print(log_probs.size())
             # returns [(batch_size x beam_size) , vocab ] when 1 step
             # or [ tgt_len, batch_size, vocab ] when full sentence
         return log_probs, attn
@@ -666,7 +675,6 @@ class Translator(object):
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
             decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
-
             log_probs, attn = self._decode_and_generate(
                 decoder_input,
                 memory_bank,

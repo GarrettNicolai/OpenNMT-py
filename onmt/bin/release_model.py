@@ -9,6 +9,7 @@ def get_ctranslate2_model_spec(opt):
     is_ct2_compatible = (
         opt.encoder_type == "transformer"
         and opt.decoder_type == "transformer"
+        and opt.enc_layers == opt.dec_layers
         and getattr(opt, "self_attn_type", "scaled-dot") == "scaled-dot"
         and ((opt.position_encoding and not with_relative_position)
              or (with_relative_position and not opt.position_encoding)))
@@ -17,7 +18,7 @@ def get_ctranslate2_model_spec(opt):
     import ctranslate2
     num_heads = getattr(opt, "heads", 8)
     return ctranslate2.specs.TransformerSpec(
-        (opt.enc_layers, opt.dec_layers),
+        opt.layers,
         num_heads,
         with_relative_position=with_relative_position)
 
@@ -33,10 +34,6 @@ def main():
                         choices=["pytorch", "ctranslate2"],
                         default="pytorch",
                         help="The format of the released model")
-    parser.add_argument("--quantization", "-q",
-                        choices=["int8", "int16"],
-                        default=None,
-                        help="Quantization type for CT2 model.")
     opt = parser.parse_args()
 
     model = torch.load(opt.model)
@@ -51,8 +48,7 @@ def main():
                              "more information on supported models.")
         import ctranslate2
         converter = ctranslate2.converters.OpenNMTPyConverter(opt.model)
-        converter.convert(opt.output, model_spec, force=True,
-                          quantization=opt.quantization)
+        converter.convert(opt.output, model_spec, force=True)
 
 
 if __name__ == "__main__":

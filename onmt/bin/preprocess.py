@@ -61,13 +61,10 @@ def process_one_shard(corpus_params, params):
     dataset = inputters.Dataset(
         fields, readers=_readers, data=_data, dirs=_dir,
         sort_key=inputters.str2sortkey[opt.data_type],
-        filter_pred=filter_pred,
-        corpus_id=maybe_id
+        filter_pred=filter_pred
     )
     if corpus_type == "train" and existing_fields is None:
         for ex in dataset.examples:
-            sub_sub_counter['corpus_id'].update(
-                ["train" if maybe_id is None else maybe_id])
             for name, field in fields.items():
                 if ((opt.data_type == "audio") and (name == "src")):
                     continue
@@ -148,7 +145,6 @@ def build_save_dataset(corpus_type, fields, src_reader, tgt_reader,
 
     src_vocab, tgt_vocab, existing_fields = maybe_load_vocab(
         corpus_type, counters, opt)
-
     existing_shards = check_existing_pt_files(
         opt, corpus_type, ids, existing_fields)
 
@@ -212,9 +208,7 @@ def build_save_dataset(corpus_type, fields, src_reader, tgt_reader,
                 fields, counters, opt.data_type,
                 opt.share_vocab, opt.vocab_size_multiple,
                 opt.src_vocab_size, opt.src_words_min_frequency,
-                opt.tgt_vocab_size, opt.tgt_words_min_frequency,
-                subword_prefix=opt.subword_prefix,
-                subword_prefix_is_joiner=opt.subword_prefix_is_joiner)
+                opt.tgt_vocab_size, opt.tgt_words_min_frequency)
         else:
             fields = existing_fields
         torch.save(fields, vocab_path)

@@ -12,7 +12,7 @@ from onmt.modules.sparse_losses import SparsemaxLoss
 from onmt.modules.sparse_activations import LogSparsemax
 
 
-def build_loss_compute(model, tgt_field, opt, train=True):
+def build_loss_compute(model, tgt_field, opt, train=True, src=None):
     """
     Returns a LossCompute subclass which wraps around an nn.Module subclass
     (such as nn.NLLLoss) which defines the loss criterion. The LossCompute
@@ -55,12 +55,14 @@ def build_loss_compute(model, tgt_field, opt, train=True):
             criterion, loss_gen, tgt_field.vocab, opt.copy_loss_by_seqlength,
             lambda_coverage=opt.lambda_coverage
         )
+        if(src != None):
+            compute.set_src(src.vocab)
+
     else:
         compute = NMTLossCompute(
             criterion, loss_gen, lambda_coverage=opt.lambda_coverage,
             lambda_align=opt.lambda_align)
     compute.to(device)
-
     return compute
 
 
@@ -168,7 +170,7 @@ class LossComputeBase(nn.Module):
             batch_stats.update(stats)
         return None, batch_stats
 
-    def _stats(self, loss, scores, target):
+    def _stats(self, loss, scores, target, src=None, tgt=None, batch_size=None):
         """
         Args:
             loss (:obj:`FloatTensor`): the loss computed by the loss criterion.
@@ -182,7 +184,47 @@ class LossComputeBase(nn.Module):
         non_padding = target.ne(self.padding_idx)
         num_correct = pred.eq(target).masked_select(non_padding).sum().item()
         num_non_padding = non_padding.sum().item()
-        return onmt.utils.Statistics(loss.item(), num_non_padding, num_correct)
+
+        '''if(src is not None):
+            target2 = []
+            print("SRC: ", src.itos)
+            print("TGT: ", tgt.itos)
+            print(target)
+            #print(target)
+
+            for i in target:
+            #    print(target[i])
+                target2.append(src.itos[target[i]-1])
+            #target3 = self._unbottle(torch.FloatTensor(target2).clone(), batch_size)
+            #print(target2)
+        '''
+        #print("PRED: ", pred)
+        #print("TARGET: ", target)
+
+        #print(len(target))
+        #print(batch_size)
+        '''
+        word_size = len(target) / batch_size
+        offset = 0
+        sent_correct = 0
+        print("SIZE: ", word_size)
+        while(offset < len(target)):
+            end_offset = int(offset+word_size-1)
+            single_tgt = target[offset:end_offset]
+            single_pred = pred[offset:end_offset]
+            sing_non_padding = single_tgt.ne(self.padding_idx)
+            sing_num_correct = single_pred.eq(single_tgt).masked_select(sing_non_padding).sum().item()
+            sing_num_non_padding = sing_non_padding.sum().item()
+            if(sing_num_correct == sing_num_non_padding):
+                print("PRED: ", single_pred)
+                print("TGT: ", single_tgt)
+                sent_correct += 1
+            #print("NUM: ", sing_num_correct)
+            
+            offset = int(offset + word_size)
+        '''
+        sent_correct = 0
+        return onmt.utils.Statistics(loss.item(), num_non_padding, num_correct, sent_correct, batch_size)
 
     def _bottle(self, _v):
         return _v.view(-1, _v.size(2))

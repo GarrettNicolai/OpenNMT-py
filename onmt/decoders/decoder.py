@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 from onmt.models.stacked_rnn import StackedLSTM, StackedGRU
 from onmt.modules import context_gate_factory, GlobalAttention
 from onmt.utils.rnn_factory import rnn_factory
-
+from onmt.modules.copy_generator import collapse_copy_scores
 from onmt.utils.misc import aeq
-
+import random
 
 class DecoderBase(nn.Module):
     """Abstract class for decoders.
@@ -82,7 +83,7 @@ class RNNDecoderBase(DecoderBase):
 
     def __init__(self, rnn_type, bidirectional_encoder, num_layers,
                  hidden_size, attn_type="general", attn_func="softmax",
-                 coverage_attn=False, context_gate=None,
+                 coverage_attn=False, context_gate=None, teacher_forcing="teacher",
                  copy_attn=False, dropout=0.0, embeddings=None,
                  reuse_copy_attn=False, copy_attn_type="general"):
         super(RNNDecoderBase, self).__init__(
@@ -93,17 +94,17 @@ class RNNDecoderBase(DecoderBase):
         self.hidden_size = hidden_size
         self.embeddings = embeddings
         self.dropout = nn.Dropout(dropout)
-
+        self.teacher_forcing = teacher_forcing
         # Decoder state
         self.state = {}
-
+        self.lin = nn.Linear(self.hidden_size, 100) # This line!
         # Build the RNN.
         self.rnn = self._build_rnn(rnn_type,
                                    input_size=self._input_size,
                                    hidden_size=hidden_size,
                                    num_layers=num_layers,
                                    dropout=dropout)
-
+        self.eval_status = False
         # Set up the context gate.
         self.context_gate = None
         if context_gate is not None:
@@ -134,6 +135,9 @@ class RNNDecoderBase(DecoderBase):
         else:
             self.copy_attn = None
 
+        self.vocab_size = 0 #Only used by student-forcing, rand, and dist
+        self.generator = None #Only used by student-forcing, rand, and dist
+
         self._reuse_copy_attn = reuse_copy_attn and copy_attn
         if self._reuse_copy_attn and not self.attentional:
             raise ValueError("Cannot reuse copy attention with no attention.")
@@ -150,6 +154,7 @@ class RNNDecoderBase(DecoderBase):
             opt.global_attention_function,
             opt.coverage_attn,
             opt.context_gate,
+            opt.teacher_forcing,
             opt.copy_attn,
             opt.dropout[0] if type(opt.dropout) is list
             else opt.dropout,
@@ -190,6 +195,35 @@ class RNNDecoderBase(DecoderBase):
         self.state["hidden"] = tuple(h.detach() for h in self.state["hidden"])
         self.state["input_feed"] = self.state["input_feed"].detach()
 
+
+    def set_vocab_size(self, vocab_size):
+        """
+        To enable random selection of a word from the vocab, we need the vocab size
+        the indices of the word will be in [0, len(vocab))
+        """
+        assert (type(vocab_size) == int), "Vocab size must be an integer!"
+        self.vocab_size = vocab_size
+    def set_generator(self, generator):
+        """
+        To enable sampling from the output distribution, we need to transform the
+        decoder hidden states into a log-softmax over the target vocabulary.
+        Luckily, we already have a function to do that.
+        """
+        self.generator = generator
+
+    def set_eval_status(self, eval_status):
+        """
+        During evaluation, we don't need the fancy generation within the decoder,
+        so turn it off
+        """
+        self.eval_status = eval_status
+    def set_copy_info(self, batch, tgt):
+        """
+        The copy generator requires certain batch information; the easiest way to
+        get it is to forward the batch to the decoder
+        """
+        self.batch = batch
+        self.tgt_vocab = tgt
     def forward(self, tgt, memory_bank, memory_lengths=None, step=None,
                 **kwargs):
         """
@@ -212,6 +246,7 @@ class RNNDecoderBase(DecoderBase):
 
         dec_state, dec_outs, attns = self._run_forward_pass(
             tgt, memory_bank, memory_lengths=memory_lengths)
+
 
         # Update the state with the result.
         if not isinstance(dec_state, tuple):
@@ -306,7 +341,6 @@ class StdRNNDecoder(RNNDecoderBase):
                 memory_lengths=memory_lengths
             )
             attns["std"] = p_attn
-
         # Calculate the context gate.
         if self.context_gate is not None:
             dec_outs = self.context_gate(
@@ -365,6 +399,7 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         input_feed = self.state["input_feed"].squeeze(0)
         input_feed_batch, _ = input_feed.size()
         _, tgt_batch, _ = tgt.size()
+
         aeq(tgt_batch, input_feed_batch)
         # END Additional args check.
 
@@ -386,9 +421,112 @@ class InputFeedRNNDecoder(RNNDecoderBase):
 
         # Input feed concatenates hidden state with
         # input at every time step.
-        for emb_t in emb.split(1):
-            decoder_input = torch.cat([emb_t.squeeze(0), input_feed], 1)
+        #GN: This is the loop that needs to be modified
+        #for emb_t in emb.split(1):
+        #print("TARGET[0]: ", tgt[0])
+        #print("LEN TARGET[0]: ", str(len(tgt[0])))
+        #temp = torch.ones(1,dtype=int)
+        #temp[0] = 5
+        #temp = temp.unsqueeze(1)
+        #temp = temp.unsqueeze(1)
+        #temp2 = self.embeddings(temp)
+        #print("TEMP: ", temp)
+        #print("TEMP2: ", temp2)
+        for t in range(0, len(tgt)):
+            if t == 0 or self.eval_status == True:
+                #emb_t = self.embeddings([t])
+                emb_t = emb.split(1)[t] #Start symbol
+            elif self.teacher_forcing == "teacher":
+                #emb_t = self.embeddings([t])
+                emb_t = emb.split(1)[t] #Use gold output
+                #print("DEC: " + str(len(dec_outs)))
+                #print("TGT: " + str(len(tgt)))
+            else:
+                #t_value = top_labels[0] #Use predicted output
+                if self.teacher_forcing == "random":
+                    rep_t = torch.ones(len(tgt[0]),dtype=int)
+                    for batch in range(len(tgt[0])):
+                        t_value = random.randint(0, self.vocab_size - 1) #Randomly select a member of the vocab
+                        rep_t[batch] = t_value
+                    rep_t = rep_t.unsqueeze(1)
+                    rep_t = rep_t.unsqueeze(1)
+
+
+                elif self.teacher_forcing == "student" or self.teacher_forcing == "dist":
+                    rep_t = torch.ones(len(tgt[0]),dtype=int)
+                    '''if self.copy_attn is None:
+                        log_probs = self.generator(decoder_output.squeeze(0))
+                    else:
+                        attn = attns["copy"]
+                        scores = self.generator(decoder_output.view(-1, decoder_output.size(2)), attn.view(-1, attn.size(2)), self.batch.src_map)
+                        #if batch_offset is None: #Not a beam search, batch_offset doesn't make sense in this case
+                        scores = scores.view(-1, self.batch.batch_size, scores.size(-1))
+                        scores = scores.transpose(0,1).contiguous()
+                        #else:
+                        #    scores = scores.view(-1, self.beam_size, scores.size(-1))
+                        src_vocabs = None #If this happens, the collapse function backs off to the back source, which is fine
+                        scores = collapse_copy_scores(scores, self.batch, self.tgt_vocab, src_vocabs, batch_dim=0)
+                        scores = scores.view(decoder_input.size(0), -1, scores.size(-1)) #decoder input is still from last t_value, so it should be fine
+                        log_probs = scores.squeeze(0).log()
+                    '''   
+
+                    for batch_id in range(len(tgt[0])):
+                        #print(log_probs[batch])
+                        top_probs, top_labels = torch.topk(log_probs[batch_id],self.vocab_size) #"COPY" is also an option
+                        #print("PROBS: ", top_probs.size())
+                        #print("LABELS: ", top_labels.size())
+                        top_probs = top_probs.squeeze(0).tolist()
+                        top_probs = np.exp(top_probs) #Normalization is required due to some extra weight that is lost in the log/exp conversion
+                        top_probs /= np.sum(top_probs)
+                        top_labels = top_labels.squeeze(0).tolist()
+                        #print("PROBS: ", top_probs)
+                        #print("LABELS: ", top_labels)
+
+                        #print("TOP PROBS: " , top_probs)
+                        #print("TOP LABELS: " , top_labels)
+
+                        #top_probs = top_probs[batch].tolist()
+                        #top_labels = top_labels[batch].tolist()
+                        if(self.teacher_forcing == "student"):
+                            t_value = top_labels[0]
+                        elif(self.teacher_forcing == "dist"):
+                            rand_val = random.uniform(0,1)
+                            rand_sum = 0.0
+                            index = 0
+                            while(rand_sum < rand_val):# and index < len(top_labels)):
+                                #print("INDEX: ", index)
+                                #print("VAL: ", rand_val)
+                                #print("SUM: ", rand_sum)
+                                rand_sum += top_probs[index]; np.exp(top_probs[index])
+                                index += 1
+                            t_value = top_labels[index-1]
+                        #rep_t[batch_id] = t_value
+                    rep_t = rep_t.unsqueeze(1)
+                    rep_t = rep_t.unsqueeze(1)
+
+                #rep_t = dtorch.ones(len(tgt[0]),dtype=int)
+                #rep_t[0] = t_value
+                #rep_t = rep_t.unsqueeze(1)
+                #rep_t = rep_t.unsqueeze(1)
+                emb_t = self.embeddings(rep_t).squeeze(1)
+
+                #print("DEC: " + str(dec_outs[-1]))
+                #print("TGT: " + str(emb.split(1)[t]))
+
+        #    elif opt.teacher_forcing == "rand":
+        #        emb_t = self.embeddings(random)
+        #    elif opt.teacher_forcing == "dist":
+        #        rand = random_integer
+        #   
+            #print(emb_t.squeeze(0).size())
+            #print(input_feed.size())
+            if(emb_t.dim() > 2):
+                decoder_input = torch.cat([emb_t.squeeze(0), input_feed], 1)
+            else:
+                decoder_input = torch.cat([emb_t, input_feed], 1)
+
             rnn_output, dec_state = self.rnn(decoder_input, dec_state)
+            #print("SIZE: ", dec_state.size())
             if self.attentional:
                 decoder_output, p_attn = self.attn(
                     rnn_output,
@@ -404,6 +542,12 @@ class InputFeedRNNDecoder(RNNDecoderBase):
                     decoder_input, rnn_output, decoder_output
                 )
             decoder_output = self.dropout(decoder_output)
+            #log_probs = self.rnn.generator(decoder_output.squeeze(0))
+            #print("PROBS: ", log_probs)
+            #top_probs, top_labels = torch.topk(probs,len(probs[0]))
+            #top_probs = top_probs[0].tolist()
+            #top_labels = top_labels[0].tolist()
+
             input_feed = decoder_output
 
             dec_outs += [decoder_output]
@@ -419,6 +563,34 @@ class InputFeedRNNDecoder(RNNDecoderBase):
                 attns["copy"] += [copy_attn]
             elif self._reuse_copy_attn:
                 attns["copy"] = attns["std"]
+
+            decoder_output = rnn_output
+            #print("DEC: ", decoder_output.size())
+            #print("ATTN: ", copy_attn.size())
+            if self.eval_status == False:
+            
+                if self.copy_attn is None:
+                    log_probs = self.generator(decoder_output.squeeze(0))
+                else:
+                    attn = attns["copy"]
+                    #print("SRC_MAP: ", self.batch.src_map.size())
+                    #print("ATTN: ", copy_attn.size())
+                    #src_map = torch.zeros(copy_attn.size(1), self.batch.src.size(0), self.batch.src.size(1), dtype=torch.float)
+                    #print(self.batch)
+                    scores = self.generator(decoder_output.view(-1, decoder_output.size(1)), copy_attn.view(-1, copy_attn.size(1)), self.batch.src_map)
+
+                    #if batch_offset is None: #Not a beam search, batch_offset doesn't make sense in this case
+                    scores = scores.view(-1, self.batch.batch_size, scores.size(-1))
+                    scores = scores.transpose(0,1).contiguous()
+                    #else:
+                    #    scores = scores.view(-1, self.beam_size, scores.size(-1))
+                    src_vocabs = None #If this happens, the collapse function backs off to the batch source, which is fine
+                    scores = collapse_copy_scores(scores, self.batch, self.tgt_vocab, src_vocabs, batch_dim=0)
+
+                    scores = scores.view(decoder_input.size(0), -1, scores.size(-1)) #decoder input is still from last t_value, so it should be fine
+                    log_probs = scores.squeeze(1).log()
+                    #log_probs = scores.squeeze(0).log()
+
 
         return dec_state, dec_outs, attns
 

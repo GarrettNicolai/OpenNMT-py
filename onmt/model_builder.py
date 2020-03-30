@@ -231,6 +231,11 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None, gpu_id=None):
                 model_opt.pre_word_vecs_dec)
 
     model.generator = generator
+
+    #if model_opt.teacher_forcing != "teacher":
+    decoder.set_vocab_size(len(fields["tgt"].base_field.vocab))
+    decoder.set_generator(model.generator)
+    
     model.to(device)
     if model_opt.model_dtype == 'fp16' and model_opt.optim == 'fusedadam':
         model.half()

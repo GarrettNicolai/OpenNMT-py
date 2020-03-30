@@ -2,8 +2,6 @@
 from __future__ import print_function
 
 import configargparse
-import onmt
-
 from onmt.models.sru import CheckSRU
 
 
@@ -66,15 +64,21 @@ def model_opts(parser):
               help="Type of source model to use. Allows "
                    "the system to incorporate non-text inputs. "
                    "Options are [text|img|audio|vec].")
+    group.add('--teacher_forcing', '-teacher_forcing', default='teacher',
+              choices=['teacher', 'student', 'random', 'dist'],
+              help="Type of teacher forcing to use during training: "
+              "teacher is gold labels; student is predicted labels; random"
+              "is random character from vocab; dist samples from"
+              "the predictive distribution")
     group.add('--model_dtype', '-model_dtype', default='fp32',
               choices=['fp32', 'fp16'],
               help='Data type of the model.')
 
     group.add('--encoder_type', '-encoder_type', type=str, default='rnn',
-              choices=['rnn', 'brnn', 'ggnn', 'mean', 'transformer', 'cnn'],
+              choices=['rnn', 'brnn', 'mean', 'transformer', 'cnn'],
               help="Type of encoder layer to use. Non-RNN layers "
                    "are experimental. Options are "
-                   "[rnn|brnn|ggnn|mean|transformer|cnn].")
+                   "[rnn|brnn|mean|transformer|cnn].")
     group.add('--decoder_type', '-decoder_type', type=str, default='rnn',
               choices=['rnn', 'transformer', 'cnn'],
               help="Type of decoder layer to use. Non-RNN layers "
@@ -130,27 +134,6 @@ def model_opts(parser):
               help="Type of context gate to use. "
                    "Do not select for no context gate.")
 
-    # The following options (bridge_extra_node to src_vocab) are used
-    # for training with --encoder_type ggnn (Gated Graph Neural Network).
-    group.add('--bridge_extra_node', '-bridge_extra_node',
-              type=bool, default=True,
-              help='Graph encoder bridges only extra node to decoder as input')
-    group.add('--bidir_edges', '-bidir_edges', type=bool, default=True,
-              help='Graph encoder autogenerates bidirectional edges')
-    group.add('--state_dim', '-state_dim', type=int, default=512,
-              help='Number of state dimensions in the graph encoder')
-    group.add('--n_edge_types', '-n_edge_types', type=int, default=2,
-              help='Number of edge types in the graph encoder')
-    group.add('--n_node', '-n_node', type=int, default=2,
-              help='Number of nodes in the graph encoder')
-    group.add('--n_steps', '-n_steps', type=int, default=2,
-              help='Number of steps to advance graph encoder')
-    # The ggnn uses src_vocab during training because the graph is built
-    # using edge information which requires parsing the input sequence.
-    group.add('--src_vocab', '-src_vocab', default="",
-              help="Path to an existing source vocabulary. Format: "
-                   "one word per line.")
-
     # Attention options
     group = parser.add_argument_group('Model- Attention')
     group.add('--global_attention', '-global_attention',
@@ -195,6 +178,8 @@ def model_opts(parser):
     group = parser.add_argument_group('Generator')
     group.add('--copy_attn', '-copy_attn', action="store_true",
               help='Train copy attention layer.')
+    group.add('--eval', '-eval', action="store_true",
+              help='Whether to run in eval-mode')
     group.add('--copy_attn_type', '-copy_attn_type',
               type=str, default=None,
               choices=['dot', 'general', 'mlp', 'none'],
@@ -356,15 +341,6 @@ def preprocess_opts(parser):
               help="Using grayscale image can training "
                    "model faster and smaller")
 
-    # Options for experimental source noising (BART style)
-    group = parser.add_argument_group('Noise')
-    group.add('--subword_prefix', '-subword_prefix',
-              type=str, default="▁",
-              help="subword prefix to build wordstart mask")
-    group.add('--subword_prefix_is_joiner', '-subword_prefix_is_joiner',
-              action='store_true',
-              help="mask will need to be inverted if prefix is joiner")
-
 
 def train_opts(parser):
     """ Training and saving options """
@@ -379,8 +355,6 @@ def train_opts(parser):
     group.add('--data_weights', '-data_weights', type=int, nargs='+',
               default=[1], help="""Weights of different corpora,
               should follow the same order as in -data_ids.""")
-    group.add('--data_to_noise', '-data_to_noise', nargs='+', default=[],
-              help="IDs of datasets on which to apply noise.")
 
     group.add('--save_model', '-save_model', default='model',
               help="Model filename (the model will be saved as "
@@ -554,12 +528,6 @@ def train_opts(parser):
               help="Step for moving average. "
                    "Default is every update, "
                    "if -average_decay is set.")
-    group.add("--src_noise", "-src_noise", type=str, nargs='+',
-              default=[],
-              choices=onmt.modules.source_noise.MultiNoise.NOISES.keys())
-    group.add("--src_noise_prob", "-src_noise_prob", type=float, nargs='+',
-              default=[],
-              help="Probabilities of src_noise functions")
 
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')

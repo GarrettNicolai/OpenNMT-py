@@ -114,7 +114,7 @@ class CopyGenerator(nn.Module):
         aeq(batch_by_tlen, batch_by_tlen_)
         aeq(slen, slen_)
 
-        # Original probabilities.
+# Original probabilities.
         logits = self.linear(hidden)
         logits[:, self.pad_idx] = -float('inf')
         prob = torch.softmax(logits, 1)
@@ -135,7 +135,7 @@ class CopyGenerator(nn.Module):
 class CopyGeneratorLoss(nn.Module):
     """Copy generator criterion."""
     def __init__(self, vocab_size, force_copy, unk_index=0,
-                 ignore_index=-100, eps=1e-20):
+                 ignore_index=-100, eps=1e-20, evaluate=False, vocab=None):
         super(CopyGeneratorLoss, self).__init__()
         self.force_copy = force_copy
         self.eps = eps
@@ -185,7 +185,7 @@ class CopyGeneratorLossCompute(NMTLossCompute):
             criterion, generator, lambda_coverage=lambda_coverage)
         self.tgt_vocab = tgt_vocab
         self.normalize_by_length = normalize_by_length
-
+        self.src = None
     def _make_shard_state(self, batch, output, range_, attns):
         """See base class for args description."""
         if getattr(batch, "alignment", None) is None:
@@ -201,6 +201,9 @@ class CopyGeneratorLossCompute(NMTLossCompute):
         })
         return shard_state
 
+    def set_src(self, src):
+        self.src = src
+
     def _compute_loss(self, batch, output, target, copy_attn, align,
                       std_attn=None, coverage_attn=None):
         """Compute the loss.
@@ -214,6 +217,7 @@ class CopyGeneratorLossCompute(NMTLossCompute):
             copy_attn: the copy attention value.
             align: the align info.
         """
+        old_target = target
         target = target.view(-1)
         align = align.view(-1)
         scores = self.generator(
@@ -231,22 +235,56 @@ class CopyGeneratorLossCompute(NMTLossCompute):
         scores_data = collapse_copy_scores(
             self._unbottle(scores.clone(), batch.batch_size),
             batch, self.tgt_vocab, None)
-        scores_data = self._bottle(scores_data)
 
+        temp = []
+        temp2 = []
+        scores_data = self._bottle(scores_data)
         # this block does not depend on the loss value computed above
         # and is used only for stats
         # Correct target copy token instead of <unk>
         # tgt[i] = align[i] + len(tgt_vocab)
         # for i such that tgt[i] == 0 and align[i] != 0
         target_data = target.clone()
+
         unk = self.criterion.unk_index
         correct_mask = (target_data == unk) & (align != unk)
         offset_align = align[correct_mask] + len(self.tgt_vocab)
+        #print("TGT: ", target_data)
         target_data[correct_mask] += offset_align
+        preds = self._unbottle(scores_data.clone(), batch.batch_size)
+
+        #print("SIZE: ", preds.size() and False)
+        if(self.src is not None and False):
+            for index1 in range(preds.size(1)):
+                tempTgt = []
+                for index2 in range(preds.size(0)):
+                    maxIndex = preds[index2][index1].argmax()
+                    #print(target)
+                    if(maxIndex not in [0,1,2,3] and maxIndex < len(self.tgt_vocab.itos)):
+                        tempTgt.append(self.tgt_vocab.itos[maxIndex.item()])
+                    if(maxIndex == 3):
+                        break
+
+                temp.append("".join(tempTgt))
+
+            for index1 in range(batch.src[0].size(1)):
+                tempSrc = []
+                #print("COPY SRC: ", self.src.itos)
+
+                for index2 in range(batch.src[0].size(0)):
+                    charIndex = batch.src[0][index2][index1]
+                    #print("CHAR: ", charIndex)
+                    #print(tempSrc)
+                    if(charIndex not in [0,1]):
+                        tempSrc.append(self.src.itos[charIndex])
+                temp2.append("".join(tempSrc))
+
+            #print("SRC: ", temp2)
+            #print("TGT: ", temp)
+
 
         # Compute sum of perplexities for stats
-        stats = self._stats(loss.sum().clone(), scores_data, target_data)
-
+        stats = self._stats(loss.sum().clone(), scores_data, target_data, self.src, self.tgt_vocab, batch.batch_size)
         # this part looks like it belongs in CopyGeneratorLoss
         if self.normalize_by_length:
             # Compute Loss as NLL divided by seq length
